@@ -121,46 +121,64 @@ async def download_file(session: aiohttp.ClientSession, url: str, destination: P
 
 async def find_tracks(session: aiohttp.ClientSession, settings: Settings, pool: asyncpg.Pool) -> list[Track]:
     LOGGER.info("Searching Ukrainian music...")
-    payload = await with_retries(
-        lambda: request_json(
-            session,
-            JAMENDO_TRACKS_URL,
-            params={
-                "client_id": settings.jamendo_client_id,
-                "format": "json",
-                "limit": 30,
-                "lang": "uk",
-                "datebetween": f"{MINIMUM_RELEASE_YEAR}-01-01_{date.today().year}-12-31",
-                "order": "releasedate_desc",
-                "audiodlformat": "mp32",
-                "include": "licenses",
-                "type": "single albumtrack",
-            },
-        ),
-        "Jamendo search",
-    )
-    candidates = payload.get("results", [])
     tracks: list[Track] = []
-    random.shuffle(candidates)
-    for item in candidates:
-        if not item.get("audiodownload_allowed") or not item.get("audiodownload"):
-            continue
-        track_id = str(item["id"])
-        exists = await pool.fetchval("SELECT 1 FROM published_tracks WHERE track_id = $1", track_id)
-        LOGGER.info("Checking duplicate...")
-        if exists:
-            continue
-        track = Track(
-            track_id=track_id,
-            artist=item.get("artist_name", "Unknown artist"),
-            name=item.get("name", "Untitled"),
-            download_url=item["audiodownload"],
-            share_url=item.get("shareurl", item.get("shorturl", "https://www.jamendo.com/")),
-            license_url=item.get("license_ccurl", "https://www.jamendo.com/legal/attribution"),
+    seen_ids: set[str] = set()
+    base_params = {
+        "client_id": settings.jamendo_client_id,
+        "format": "json",
+        "limit": 30,
+        "datebetween": f"{MINIMUM_RELEASE_YEAR}-01-01_{date.today().year}-12-31",
+        "order": "releasedate_desc",
+        "audiodlformat": "mp32",
+        "include": "licenses musicinfo",
+        "type": "single albumtrack",
+    }
+    searches = ({"lang": "uk"}, {"fuzzytags": "ukrainian"})
+    for search_index, search in enumerate(searches):
+        payload = await with_retries(
+            lambda search=search: request_json(
+                session,
+                JAMENDO_TRACKS_URL,
+                params={**base_params, **search},
+            ),
+            "Jamendo search",
         )
-        LOGGER.info("Found: %s - %s", track.artist, track.name)
-        tracks.append(track)
+        candidates = payload.get("results", [])
+        random.shuffle(candidates)
+        for item in candidates:
+            if search_index == 1 and not looks_ukrainian(item):
+                continue
+            if not item.get("audiodownload_allowed") or not item.get("audiodownload"):
+                continue
+            track_id = str(item["id"])
+            if track_id in seen_ids:
+                continue
+            seen_ids.add(track_id)
+            exists = await pool.fetchval("SELECT 1 FROM published_tracks WHERE track_id = $1", track_id)
+            LOGGER.info("Checking duplicate...")
+            if exists:
+                continue
+            track = Track(
+                track_id=track_id,
+                artist=item.get("artist_name", "Unknown artist"),
+                name=item.get("name", "Untitled"),
+                download_url=item["audiodownload"],
+                share_url=item.get("shareurl", item.get("shorturl", "https://www.jamendo.com/")),
+                license_url=item.get("license_ccurl", "https://www.jamendo.com/legal/attribution"),
+            )
+            LOGGER.info("Found: %s - %s", track.artist, track.name)
+            tracks.append(track)
     return tracks
+
+
+def looks_ukrainian(item: dict[str, Any]) -> bool:
+    language = str(item.get("musicinfo", {}).get("lang", "")).lower()
+    if language in {"ru", "rus", "russian"}:
+        return False
+    if language in {"uk", "ukr", "ukrainian"}:
+        return True
+    text = f"{item.get('artist_name', '')} {item.get('name', '')}".lower()
+    return any(character in text for character in "іїєґ")
 
 
 async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
