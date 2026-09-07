@@ -49,6 +49,8 @@ class Settings:
     webapp_host: str
     webapp_port: int
     web_only: bool
+    ingest_updates_enabled: bool
+    publish_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -76,6 +78,8 @@ class Settings:
             webapp_host=os.getenv("WEBAPP_HOST", "0.0.0.0"),
             webapp_port=int(os.getenv("WEBAPP_PORT", "8080")),
             web_only=os.getenv("WEB_ONLY", "false").lower() == "true",
+            ingest_updates_enabled=os.getenv("INGEST_UPDATES", "true").lower() == "true",
+            publish_enabled=os.getenv("PUBLISH_ENABLED", "true").lower() == "true",
         )
 
 
@@ -633,16 +637,23 @@ async def main() -> None:
                 await asyncio.Event().wait()
                 return
             if settings.run_once:
-                await ingest_updates(bot, session, pool, settings)
-                await publish_once(bot, session, pool, settings)
+                if settings.ingest_updates_enabled:
+                    await ingest_updates(bot, session, pool, settings)
+                if settings.publish_enabled:
+                    await publish_once(bot, session, pool, settings)
                 if web_runner:
                     await web_runner.cleanup()
                 return
             try:
-                await asyncio.gather(
-                    update_loop(bot, session, pool, settings),
-                    publisher_loop(bot, session, pool, settings),
-                )
+                tasks = []
+                if settings.ingest_updates_enabled:
+                    tasks.append(update_loop(bot, session, pool, settings))
+                if settings.publish_enabled:
+                    tasks.append(publisher_loop(bot, session, pool, settings))
+                if tasks:
+                    await asyncio.gather(*tasks)
+                else:
+                    await asyncio.Event().wait()
             finally:
                 if web_runner:
                     await web_runner.cleanup()
