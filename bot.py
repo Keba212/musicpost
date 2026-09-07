@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 
@@ -122,6 +123,16 @@ async def request_json(
         return await response.json()
 
 
+async def answer_callback_safely(bot: Bot, callback_id: str, text: str | None = None) -> None:
+    try:
+        await bot.answer_callback_query(callback_id, text=text)
+    except TelegramBadRequest as error:
+        if "query is too old" in str(error).lower() or "query id is invalid" in str(error).lower():
+            LOGGER.warning("Skipping expired callback query %s", callback_id)
+            return
+        raise
+
+
 async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg.Pool, settings: Settings) -> None:
     last_update_id = await pool.fetchval("SELECT value FROM bot_state WHERE key = 'last_update_id'")
     updates = await with_retries(
@@ -141,11 +152,11 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                 if data == "menu:home":
                     rows = await get_queue_rows(pool)
                     await callback.message.edit_text(build_menu_text(rows), reply_markup=build_menu_keyboard(settings))
-                    await bot.answer_callback_query(callback.id)
+                    await answer_callback_safely(bot, callback.id)
                 elif data == "menu:queue":
                     rows = await get_queue_rows(pool)
                     await callback.message.edit_text(build_queue_message(rows), reply_markup=build_queue_keyboard(rows))
-                    await bot.answer_callback_query(callback.id)
+                    await answer_callback_safely(bot, callback.id)
                 elif data == "menu:publish":
                     published = await publish_next_track(bot, session, pool, settings)
                     rows = await get_queue_rows(pool)
@@ -154,27 +165,27 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         + build_menu_text(rows),
                         reply_markup=build_menu_keyboard(settings),
                     )
-                    await bot.answer_callback_query(callback.id, text="Опубліковано" if published else "Немає треку")
+                    await answer_callback_safely(bot, callback.id, text="Опубліковано" if published else "Немає треку")
                 elif data == "menu:clear_confirm":
                     await callback.message.edit_text(
                         "⚠️ Точно очистити всі треки зі статусом «у черзі»?",
                         reply_markup=build_clear_confirmation_keyboard(),
                     )
-                    await bot.answer_callback_query(callback.id)
+                    await answer_callback_safely(bot, callback.id)
                 elif data == "menu:clear":
                     await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
                     await callback.message.edit_text(
                         "✅ Чергу очищено.\n\n" + build_menu_text([]),
                         reply_markup=build_menu_keyboard(settings),
                     )
-                    await bot.answer_callback_query(callback.id, text="Чергу очищено")
+                    await answer_callback_safely(bot, callback.id, text="Чергу очищено")
                 elif data == "menu:help":
                     await callback.message.edit_text(
                         "Надішли боту аудіо, щоб додати його в чергу.\n\n"
                         "Публікація відбувається автоматично раз на годину або вручну через меню.",
                         reply_markup=build_menu_keyboard(settings),
                     )
-                    await bot.answer_callback_query(callback.id)
+                    await answer_callback_safely(bot, callback.id)
                 elif data.startswith("publish_now:"):
                     queue_id = int(data.split(":", 1)[1])
                     published = await publish_specific_track(bot, session, pool, settings, queue_id)
@@ -184,7 +195,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         + build_queue_message(rows),
                         reply_markup=build_queue_keyboard(rows),
                     )
-                    await bot.answer_callback_query(callback.id, text="Опубліковано" if published else "Помилка")
+                    await answer_callback_safely(bot, callback.id, text="Опубліковано" if published else "Помилка")
 
         message = update.message
         if message and message.chat.type == "private" and is_allowed_sender(message, settings):
