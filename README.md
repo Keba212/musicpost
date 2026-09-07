@@ -43,6 +43,7 @@ docker compose up --build
 ```text
 BOT_TOKEN
 TARGET_CHAT_ID
+TARGET_CHANNEL_URL
 PEXELS_API_KEY
 DATABASE_URL
 ADMIN_USER_ID
@@ -82,7 +83,7 @@ fly mpg attach CLUSTER_ID -a ukrainian-music-bot
 
 `fly mpg attach` встановлює pooled `DATABASE_URL` як secret і перезапускає app. Якщо ви приєднали database до іншої назви app, використовуйте фактичне ім'я app.
 
-Встановіть secrets. `ADMIN_USER_ID` необов'язковий, але рекомендований: тоді бот прийматиме треки лише від твого Telegram-акаунта.
+Встановіть secrets. `TARGET_CHANNEL_URL` — це посилання на твій канал або invite-link приватного каналу. `ADMIN_USER_ID` необов'язковий, але рекомендований: тоді бот прийматиме треки лише від твого Telegram-акаунта.
 
 ```bash
 fly secrets set BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN" TARGET_CHAT_ID="@your_channel" PEXELS_API_KEY="YOUR_PEXELS_API_KEY" -a ukrainian-music-bot
@@ -114,6 +115,8 @@ fly logs -a ukrainian-music-bot
 4. Знайдіть `ADMIN_USER_ID` через бота на кшталт `@userinfobot` і додайте його як GitHub Secret.
 5. Перешліть аудіо боту в особистий чат. Бот не потребує admin-доступу до каналу, звідки ти переслав трек.
 6. GitHub Actions щогодини опублікує один трек із черги.
+
+Після пересилання бот покаже кнопки `Черга` та `Опублікувати зараз`. У безкоштовному GitHub Actions режимі вони обробляються під час найближчого запуску workflow; для миттєвої реакції потрібен постійно запущений worker.
 
 ## Важливі обмеження API
 

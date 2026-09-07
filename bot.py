@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import random
@@ -12,7 +13,7 @@ import asyncpg
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 
 LOGGER = logging.getLogger("ukrainian_music_bot")
@@ -24,6 +25,7 @@ RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 class Settings:
     bot_token: str
     target_chat_id: str
+    target_channel_url: str
     pexels_api_key: str
     database_url: str
     admin_user_id: int | None
@@ -35,13 +37,14 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "PEXELS_API_KEY", "DATABASE_URL")
+        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "TARGET_CHANNEL_URL", "PEXELS_API_KEY", "DATABASE_URL")
         missing = [name for name in required if not os.getenv(name)]
         if missing and os.getenv("DRY_RUN", "true").lower() != "true":
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
         return cls(
             bot_token=os.getenv("BOT_TOKEN", "dry-run-token"),
             target_chat_id=os.getenv("TARGET_CHAT_ID", "dry-run-chat"),
+            target_channel_url=os.getenv("TARGET_CHANNEL_URL", "https://t.me/"),
             pexels_api_key=os.getenv("PEXELS_API_KEY", "dry-run-key"),
             database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ukrainian_music"),
             admin_user_id=int(os.environ["ADMIN_USER_ID"]) if os.getenv("ADMIN_USER_ID") else None,
@@ -107,11 +110,13 @@ async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> No
             offset=(last_update_id or 0) + 1,
             limit=100,
             timeout=0,
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
         ),
         "Telegram updates",
     )
     for update in updates:
+        if update.callback_query and is_allowed_callback(update.callback_query, settings):
+            await handle_callback(update.callback_query, bot, pool)
         message = update.message
         if message and message.chat.type == "private" and is_allowed_sender(message, settings):
             if message.audio:
@@ -129,6 +134,13 @@ async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> No
                     message.audio.title or "Untitled",
                 )
                 LOGGER.info("Queued: %s - %s", message.audio.performer or "Unknown artist", message.audio.title or "Untitled")
+                await bot.send_message(
+                    message.chat.id,
+                    "✅ Трек додано в чергу",
+                    reply_markup=admin_keyboard(),
+                )
+            elif message.text in {"/start", "/menu", "/queue", "/publish_now"}:
+                await bot.send_message(message.chat.id, "🎧 MØOD | UA", reply_markup=admin_keyboard())
         await pool.execute(
             """
             INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
@@ -142,6 +154,35 @@ def is_allowed_sender(message: Message, settings: Settings) -> bool:
     return settings.admin_user_id is None or (
         message.from_user is not None and message.from_user.id == settings.admin_user_id
     )
+
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Черга", callback_data="queue")],
+            [InlineKeyboardButton(text="🚀 Опублікувати зараз", callback_data="publish_now")],
+        ]
+    )
+
+
+def is_allowed_callback(callback: CallbackQuery, settings: Settings) -> bool:
+    return settings.admin_user_id is None or (
+        callback.from_user is not None and callback.from_user.id == settings.admin_user_id
+    )
+
+
+async def handle_callback(callback: CallbackQuery, bot: Bot, pool: asyncpg.Pool) -> None:
+    if callback.data == "queue":
+        count = await pool.fetchval("SELECT COUNT(*) FROM queued_tracks WHERE status = 'queued'")
+        await callback.answer(f"У черзі: {count}", show_alert=True)
+    elif callback.data == "publish_now":
+        await pool.execute(
+            """
+            INSERT INTO bot_state (key, value) VALUES ('publish_now', 1)
+            ON CONFLICT (key) DO UPDATE SET value = 1
+            """
+        )
+        await callback.answer("Опублікуємо під час найближчого запуску", show_alert=True)
 
 
 async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
@@ -165,8 +206,16 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
     )
 
 
-def make_caption(track: Track, image: ImageResult) -> str:
-    return f"🇺🇦 <b>{track.artist} - {track.name}</b>\n📷 Фото: {image.photographer} / Pexels"
+def make_caption(track: Track, image: ImageResult, settings: Settings) -> str:
+    artist = html.escape(track.artist)
+    name = html.escape(track.name)
+    photographer = html.escape(image.photographer)
+    channel_url = html.escape(settings.target_channel_url, quote=True)
+    return (
+        f"🇺🇦 <b>{artist} - {name}</b>\n"
+        f"📷 Фото: {photographer} / Pexels\n\n"
+        f"<a href=\"{channel_url}\">🎧MØOD | UA🇺🇦</a>"
+    )
 
 
 async def init_database(pool: asyncpg.Pool) -> None:
@@ -224,7 +273,7 @@ async def publish_once(
     try:
         await pool.execute("UPDATE queued_tracks SET status = 'publishing' WHERE id = $1", track.queue_id)
         image = await find_image(session, settings)
-        caption = make_caption(track, image)
+        caption = make_caption(track, image, settings)
         if settings.dry_run:
             LOGGER.info("DRY_RUN=true; skipping publishing")
             await pool.execute("UPDATE queued_tracks SET status = 'queued' WHERE id = $1", track.queue_id)
