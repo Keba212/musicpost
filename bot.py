@@ -4,10 +4,7 @@ import asyncio
 import logging
 import os
 import random
-import tempfile
 from dataclasses import dataclass
-from datetime import date
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import aiohttp
@@ -15,23 +12,21 @@ import asyncpg
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile
+from aiogram.types import Message
 
 
 LOGGER = logging.getLogger("ukrainian_music_bot")
-JAMENDO_TRACKS_URL = "https://api.jamendo.com/v3.0/tracks/"
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
-MINIMUM_RELEASE_YEAR = 2020
 
 
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
     target_chat_id: str
-    jamendo_client_id: str
     pexels_api_key: str
     database_url: str
+    admin_user_id: int | None
     dry_run: bool
     interval_minutes: int
     image_style: str
@@ -40,16 +35,16 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "JAMENDO_CLIENT_ID", "PEXELS_API_KEY", "DATABASE_URL")
+        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "PEXELS_API_KEY", "DATABASE_URL")
         missing = [name for name in required if not os.getenv(name)]
         if missing and os.getenv("DRY_RUN", "true").lower() != "true":
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
         return cls(
             bot_token=os.getenv("BOT_TOKEN", "dry-run-token"),
             target_chat_id=os.getenv("TARGET_CHAT_ID", "dry-run-chat"),
-            jamendo_client_id=os.getenv("JAMENDO_CLIENT_ID", "dry-run-client"),
             pexels_api_key=os.getenv("PEXELS_API_KEY", "dry-run-key"),
             database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ukrainian_music"),
+            admin_user_id=int(os.environ["ADMIN_USER_ID"]) if os.getenv("ADMIN_USER_ID") else None,
             dry_run=os.getenv("DRY_RUN", "true").lower() == "true",
             interval_minutes=int(os.getenv("POST_INTERVAL_MINUTES", "360")),
             image_style=os.getenv(
@@ -63,20 +58,16 @@ class Settings:
 
 @dataclass(frozen=True)
 class Track:
-    track_id: str
+    queue_id: int
+    audio_file_id: str
     artist: str
     name: str
-    download_url: str
-    share_url: str
-    license_url: str
 
 
 @dataclass(frozen=True)
 class ImageResult:
     download_url: str
-    page_url: str
     photographer: str
-    photographer_url: str
 
 
 async def with_retries(
@@ -109,76 +100,48 @@ async def request_json(
         return await response.json()
 
 
-async def download_file(session: aiohttp.ClientSession, url: str, destination: Path) -> None:
-    async with session.get(url) as response:
-        if response.status in RETRYABLE_STATUS_CODES:
-            raise RuntimeError(f"HTTP {response.status}")
-        response.raise_for_status()
-        with destination.open("wb") as file:
-            async for chunk in response.content.iter_chunked(64 * 1024):
-                file.write(chunk)
-
-
-async def find_tracks(session: aiohttp.ClientSession, settings: Settings, pool: asyncpg.Pool) -> list[Track]:
-    LOGGER.info("Searching Ukrainian music...")
-    tracks: list[Track] = []
-    seen_ids: set[str] = set()
-    base_params = {
-        "client_id": settings.jamendo_client_id,
-        "format": "json",
-        "limit": 30,
-        "datebetween": f"{MINIMUM_RELEASE_YEAR}-01-01_{date.today().year}-12-31",
-        "order": "releasedate_desc",
-        "audiodlformat": "mp32",
-        "include": "licenses musicinfo",
-        "type": "single albumtrack",
-    }
-    searches = ({"lang": "uk"}, {"fuzzytags": "ukrainian"})
-    for search_index, search in enumerate(searches):
-        payload = await with_retries(
-            lambda search=search: request_json(
-                session,
-                JAMENDO_TRACKS_URL,
-                params={**base_params, **search},
-            ),
-            "Jamendo search",
+async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> None:
+    last_update_id = await pool.fetchval("SELECT value FROM bot_state WHERE key = 'last_update_id'")
+    updates = await with_retries(
+        lambda: bot.get_updates(
+            offset=(last_update_id or 0) + 1,
+            limit=100,
+            timeout=0,
+            allowed_updates=["message"],
+        ),
+        "Telegram updates",
+    )
+    for update in updates:
+        message = update.message
+        if message and message.chat.type == "private" and is_allowed_sender(message, settings):
+            if message.audio:
+                await pool.execute(
+                    """
+                    INSERT INTO queued_tracks
+                        (source_chat_id, source_message_id, audio_file_id, artist, name)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
+                    """,
+                    message.chat.id,
+                    message.message_id,
+                    message.audio.file_id,
+                    message.audio.performer or "Unknown artist",
+                    message.audio.title or "Untitled",
+                )
+                LOGGER.info("Queued: %s - %s", message.audio.performer or "Unknown artist", message.audio.title or "Untitled")
+        await pool.execute(
+            """
+            INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            update.update_id,
         )
-        candidates = payload.get("results", [])
-        random.shuffle(candidates)
-        for item in candidates:
-            if search_index == 1 and not looks_ukrainian(item):
-                continue
-            if not item.get("audiodownload_allowed") or not item.get("audiodownload"):
-                continue
-            track_id = str(item["id"])
-            if track_id in seen_ids:
-                continue
-            seen_ids.add(track_id)
-            exists = await pool.fetchval("SELECT 1 FROM published_tracks WHERE track_id = $1", track_id)
-            LOGGER.info("Checking duplicate...")
-            if exists:
-                continue
-            track = Track(
-                track_id=track_id,
-                artist=item.get("artist_name", "Unknown artist"),
-                name=item.get("name", "Untitled"),
-                download_url=item["audiodownload"],
-                share_url=item.get("shareurl", item.get("shorturl", "https://www.jamendo.com/")),
-                license_url=item.get("license_ccurl", "https://www.jamendo.com/legal/attribution"),
-            )
-            LOGGER.info("Found: %s - %s", track.artist, track.name)
-            tracks.append(track)
-    return tracks
 
 
-def looks_ukrainian(item: dict[str, Any]) -> bool:
-    language = str(item.get("musicinfo", {}).get("lang", "")).lower()
-    if language in {"ru", "rus", "russian"}:
-        return False
-    if language in {"uk", "ukr", "ukrainian"}:
-        return True
-    text = f"{item.get('artist_name', '')} {item.get('name', '')}".lower()
-    return any(character in text for character in "іїєґ")
+def is_allowed_sender(message: Message, settings: Settings) -> bool:
+    return settings.admin_user_id is None or (
+        message.from_user is not None and message.from_user.id == settings.admin_user_id
+    )
 
 
 async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
@@ -198,9 +161,7 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
     photo = random.choice(photos)
     return ImageResult(
         download_url=photo["src"]["large"],
-        page_url=photo["url"],
         photographer=photo["photographer"],
-        photographer_url=photo["photographer_url"],
     )
 
 
@@ -211,12 +172,26 @@ def make_caption(track: Track, image: ImageResult) -> str:
 async def init_database(pool: asyncpg.Pool) -> None:
     await pool.execute(
         """
-        CREATE TABLE IF NOT EXISTS published_tracks (
-            track_id TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS queued_tracks (
+            id BIGSERIAL PRIMARY KEY,
+            source_chat_id BIGINT NOT NULL,
+            source_message_id BIGINT NOT NULL,
+            audio_file_id TEXT NOT NULL,
             artist TEXT NOT NULL,
             name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
             telegram_message_id BIGINT,
-            published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            published_at TIMESTAMPTZ,
+            UNIQUE (source_chat_id, source_message_id)
+        )
+        """
+    )
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value BIGINT NOT NULL
         )
         """
     )
@@ -228,51 +203,58 @@ async def publish_once(
     pool: asyncpg.Pool,
     settings: Settings,
 ) -> bool:
-    tracks = await find_tracks(session, settings, pool)
-    if not tracks:
-        LOGGER.warning("No downloadable, unpublished track found")
+    row = await pool.fetchrow(
+        """
+        SELECT id, audio_file_id, artist, name
+        FROM queued_tracks
+        WHERE status = 'queued'
+        ORDER BY queued_at, id
+        LIMIT 1
+        """
+    )
+    if not row:
+        LOGGER.info("Queue is empty; nothing to publish")
         return False
-    for track in tracks:
-        try:
-            image = await find_image(session, settings)
-            caption = make_caption(track, image)
-            if settings.dry_run:
-                LOGGER.info("DRY_RUN=true; skipping download, publishing, and database insert")
-                return True
-
-            with tempfile.TemporaryDirectory(prefix="ukrainian-music-") as temporary_dir:
-                image_path = Path(temporary_dir) / "cover.jpg"
-                audio_path = Path(temporary_dir) / "track.mp3"
-                LOGGER.info("Downloading audio...")
-                await with_retries(lambda: download_file(session, track.download_url, audio_path), "audio download")
-                await with_retries(lambda: download_file(session, image.download_url, image_path), "image download")
-                LOGGER.info("Publishing...")
-                photo_message = await with_retries(
-                    lambda: bot.send_photo(settings.target_chat_id, FSInputFile(image_path), caption=caption),
-                    "Telegram photo publish",
-                )
-                await with_retries(
-                    lambda: bot.send_audio(
-                        settings.target_chat_id,
-                        FSInputFile(audio_path),
-                        title=track.name,
-                        performer=track.artist,
-                        caption=caption,
-                    ),
-                    "Telegram audio publish",
-                )
-                await pool.execute(
-                    "INSERT INTO published_tracks (track_id, artist, name, telegram_message_id) VALUES ($1, $2, $3, $4)",
-                    track.track_id,
-                    track.artist,
-                    track.name,
-                    photo_message.message_id,
-                )
-            LOGGER.info("Published successfully")
+    track = Track(
+        queue_id=row["id"],
+        audio_file_id=row["audio_file_id"],
+        artist=row["artist"],
+        name=row["name"],
+    )
+    try:
+        await pool.execute("UPDATE queued_tracks SET status = 'publishing' WHERE id = $1", track.queue_id)
+        image = await find_image(session, settings)
+        caption = make_caption(track, image)
+        if settings.dry_run:
+            LOGGER.info("DRY_RUN=true; skipping publishing")
+            await pool.execute("UPDATE queued_tracks SET status = 'queued' WHERE id = $1", track.queue_id)
             return True
-        except Exception:
-            LOGGER.exception("Track failed; skipping it and trying another candidate")
-    return False
+        LOGGER.info("Publishing...")
+        await with_retries(
+            lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
+            "Telegram photo publish",
+        )
+        audio_message = await with_retries(
+            lambda: bot.send_audio(
+                settings.target_chat_id,
+                track.audio_file_id,
+                title=track.name,
+                performer=track.artist,
+                caption=caption,
+            ),
+            "Telegram audio publish",
+        )
+        await pool.execute(
+            "UPDATE queued_tracks SET status = 'published', telegram_message_id = $1, published_at = NOW() WHERE id = $2",
+            audio_message.message_id,
+            track.queue_id,
+        )
+        LOGGER.info("Published successfully")
+        return True
+    except Exception:
+        await pool.execute("UPDATE queued_tracks SET status = 'queued' WHERE id = $1", track.queue_id)
+        LOGGER.exception("Queued track failed; it will be retried next hour")
+        return False
 
 
 async def main() -> None:
@@ -284,15 +266,17 @@ async def main() -> None:
     await init_database(pool)
     timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
     try:
-        async with aiohttp.ClientSession(timeout=timeout), Bot(
+        async with aiohttp.ClientSession(timeout=timeout) as session, Bot(
             settings.bot_token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         ) as bot:
             if settings.run_once:
+                await ingest_updates(bot, pool, settings)
                 await publish_once(bot, session, pool, settings)
                 return
             while True:
                 try:
+                    await ingest_updates(bot, pool, settings)
                     await publish_once(bot, session, pool, settings)
                 except Exception:
                     LOGGER.exception("Post cycle failed; the bot will continue")

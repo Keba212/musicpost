@@ -1,16 +1,16 @@
 # Ukrainian Music Telegram Bot
 
-Легальний автоматичний постинг української музики у Telegram-канал раз на годину, якщо доступний відповідний трек.
+Автоматичний постинг пересланих аудіотреків у Telegram-канал раз на годину.
 
 ## Як це працює
 
-Бот шукає треки через офіційний Jamendo API v3, бере лише треки з `audiodownload_allowed=true`, знаходить фото через Pexels API, публікує фото й аудіо через Telegram Bot API та записує `track_id` у PostgreSQL для захисту від повторів. Тимчасові файли створюються у `/tmp` і видаляються одразу після публікації.
+Ти пересилаєш аудіо боту в особистий чат. Бот зберігає лише Telegram `file_id` і metadata у PostgreSQL, щогодини публікує один трек із черги та знаходить атмосферне фото через Pexels. Аудіо не завантажується на диск.
 
 `DRY_RUN=true` є безпечним значенням у `.env.example`: бот може перевірити пошук, але не завантажує та не публікує медіа. Для production GitHub Actions виставляє `DRY_RUN=false` і `RUN_ONCE=true`.
 
 ## Безпека
 
-Токен Telegram, Jamendo client ID, Pexels API key і `DATABASE_URL` не зберігаються в репозиторії. Вони передаються через environment variables локально або через Fly.io secrets. Не вставляйте реальні значення у `README.md`, `.env.example` чи логи.
+Токен Telegram, Pexels API key і `DATABASE_URL` не зберігаються в репозиторії. Вони передаються через environment variables локально або через GitHub Actions secrets. Не вставляйте реальні значення у `README.md`, `.env.example` чи логи.
 
 ## GitHub і локальні файли
 
@@ -34,7 +34,7 @@ docker compose up --build
 
 ## Безкоштовний deployment через GitHub Actions
 
-Цей варіант не потребує постійної Fly Machine. GitHub Actions запускає один цикл бота кожні 6 годин. Розклад GitHub може виконуватися із затримкою. Для дедуплікації потрібен безкоштовний PostgreSQL provider, наприклад Neon Free або Supabase Free; цей проєкт не створює базу автоматично.
+Цей варіант не потребує постійної Fly Machine. GitHub Actions запускає один цикл бота щогодини. Розклад GitHub може виконуватися із затримкою. Для черги потрібен безкоштовний PostgreSQL provider, наприклад Neon Free або Supabase Free; цей проєкт не створює базу автоматично.
 
 1. Створіть PostgreSQL database у вибраному provider і скопіюйте pooled connection string.
 2. У GitHub repository відкрийте `Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`.
@@ -43,9 +43,9 @@ docker compose up --build
 ```text
 BOT_TOKEN
 TARGET_CHAT_ID
-JAMENDO_CLIENT_ID
 PEXELS_API_KEY
 DATABASE_URL
+ADMIN_USER_ID
 ```
 
 4. Відкрийте вкладку `Actions`, виберіть `Publish Ukrainian music` і натисніть `Run workflow` для першого запуску.
@@ -82,10 +82,10 @@ fly mpg attach CLUSTER_ID -a ukrainian-music-bot
 
 `fly mpg attach` встановлює pooled `DATABASE_URL` як secret і перезапускає app. Якщо ви приєднали database до іншої назви app, використовуйте фактичне ім'я app.
 
-Встановіть решту secrets. Значення після `=` вводьте локально, не комітьте їх і не вставляйте у цей README:
+Встановіть secrets. `ADMIN_USER_ID` необов'язковий, але рекомендований: тоді бот прийматиме треки лише від твого Telegram-акаунта.
 
 ```bash
-fly secrets set BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN" TARGET_CHAT_ID="@your_channel" JAMENDO_CLIENT_ID="YOUR_JAMENDO_CLIENT_ID" PEXELS_API_KEY="YOUR_PEXELS_API_KEY" -a ukrainian-music-bot
+fly secrets set BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN" TARGET_CHAT_ID="@your_channel" PEXELS_API_KEY="YOUR_PEXELS_API_KEY" -a ukrainian-music-bot
 ```
 
 Якщо `DATABASE_URL` не встановлювався через attach, встановіть його через безпечний connection string з MPG dashboard:
@@ -109,23 +109,22 @@ fly logs -a ukrainian-music-bot
 ## Telegram налаштування
 
 1. Створіть бота через `@BotFather` і візьміть token.
-2. Додайте бота до каналу як administrator.
-3. Видайте йому право `Post Messages`. Для цього проєкту достатньо публікувати повідомлення; інші права не потрібні.
-4. Вкажіть у `TARGET_CHAT_ID` username публічного каналу у форматі `@channel_username`. Для приватного каналу використовуйте numeric chat ID, отриманий через Telegram Bot API після додавання бота.
-5. Після `fly deploy` бот автоматично публікуватиме новий трек приблизно кожні 360 хвилин.
+2. Додайте бота до твого target-каналу як administrator із правом `Post Messages`.
+3. Вкажіть у `TARGET_CHAT_ID` username публічного каналу або numeric ID приватного каналу.
+4. Знайдіть `ADMIN_USER_ID` через бота на кшталт `@userinfobot` і додайте його як GitHub Secret.
+5. Перешліть аудіо боту в особистий чат. Бот не потребує admin-доступу до каналу, звідки ти переслав трек.
+6. GitHub Actions щогодини опублікує один трек із черги.
 
 ## Важливі обмеження API
 
-- Jamendo не гарантує, що весь каталог містить сучасну українську музику. Бот фільтрує результати за `lang=uk`, датою релізу від 2020 року та `audiodownload_allowed=true`; це легальний варіант без scraping або обходу обмежень.
 - Pexels вимагає attribution із посиланням на фотографа та Pexels. Поточний короткий caption залишає текстовий credit без URL на прохання власника каналу; для повної відповідності Pexels terms потрібно повернути клікабельні посилання або замінити джерело зображень на джерело з відповідною ліцензією без такої вимоги.
-- Telegram Bot API має ліміти розміру медіа та rate limits. HTTP 408/425/429/5xx і тимчасові помилки повторюються з exponential backoff. Якщо окремий трек не завантажився, цикл завершується з помилкою, файли чистяться, а наступна спроба не зупиняє процес.
-- Тимчасові audio/image файли видаляються після кожного запуску; PostgreSQL зберігає лише metadata і deduplication IDs.
+- Telegram Bot API має ліміти та rate limits. HTTP 408/425/429/5xx і тимчасові помилки повторюються з exponential backoff.
+- Копіюй лише музику, яку дозволено перепубліковувати. Бот не читає чужі канали самостійно й не обходить їхні права доступу.
 
 ## Офіційна документація
 
 - [Telegram Bot API](https://core.telegram.org/bots/api)
 - [aiogram](https://docs.aiogram.dev/en/latest/)
-- [Jamendo API v3](https://developer.jamendo.com/v3.0/docs)
 - [Pexels API](https://www.pexels.com/api/documentation/)
 - [Fly.io](https://fly.io/docs/)
 - [Fly Managed Postgres](https://fly.io/docs/mpg/)
