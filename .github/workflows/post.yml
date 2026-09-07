@@ -2,14 +2,14 @@ name: Publish Ukrainian music
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/25 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: hourly-music-publish
+  group: scheduled-music-publish
   cancel-in-progress: false
 
 jobs:
@@ -28,6 +28,7 @@ jobs:
       PUBLISH_ENABLED: "true"
       DRY_RUN: "false"
       RUN_ONCE: "true"
+      POST_INTERVAL_MINUTES: "25"
       HTTP_TIMEOUT_SECONDS: "45"
     steps:
       - name: Check out repository
