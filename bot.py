@@ -1,31 +1,39 @@
 from __future__ import annotations
 
 import asyncio
-import html
+import hashlib
+import hmac
+import json
 import logging
 import os
 import random
+import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl
 
 import aiohttp
 import asyncpg
+from aiohttp import web
+from dotenv import load_dotenv
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 
 LOGGER = logging.getLogger("ukrainian_music_bot")
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
+load_dotenv()
+
 
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
     target_chat_id: str
-    target_channel_url: str
     pexels_api_key: str
     database_url: str
     admin_user_id: int | None
@@ -34,17 +42,22 @@ class Settings:
     image_style: str
     timeout_seconds: int
     run_once: bool
+    channel_username: str
+    channel_link: str
+    webapp_url: str
+    webapp_host: str
+    webapp_port: int
+    web_only: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
-        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "TARGET_CHANNEL_URL", "PEXELS_API_KEY", "DATABASE_URL")
+        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "PEXELS_API_KEY", "DATABASE_URL")
         missing = [name for name in required if not os.getenv(name)]
         if missing and os.getenv("DRY_RUN", "true").lower() != "true":
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
         return cls(
             bot_token=os.getenv("BOT_TOKEN", "dry-run-token"),
             target_chat_id=os.getenv("TARGET_CHAT_ID", "dry-run-chat"),
-            target_channel_url=os.getenv("TARGET_CHANNEL_URL", "https://t.me/"),
             pexels_api_key=os.getenv("PEXELS_API_KEY", "dry-run-key"),
             database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ukrainian_music"),
             admin_user_id=int(os.environ["ADMIN_USER_ID"]) if os.getenv("ADMIN_USER_ID") else None,
@@ -56,6 +69,12 @@ class Settings:
             ),
             timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "45")),
             run_once=os.getenv("RUN_ONCE", "false").lower() == "true",
+            channel_username=os.getenv("CHANNEL_USERNAME", "").strip(),
+            channel_link=os.getenv("CHANNEL_LINK", "").strip(),
+            webapp_url=os.getenv("WEBAPP_URL", "").strip(),
+            webapp_host=os.getenv("WEBAPP_HOST", "0.0.0.0"),
+            webapp_port=int(os.getenv("WEBAPP_PORT", "8080")),
+            web_only=os.getenv("WEB_ONLY", "false").lower() == "true",
         )
 
 
@@ -103,7 +122,7 @@ async def request_json(
         return await response.json()
 
 
-async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> None:
+async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg.Pool, settings: Settings) -> None:
     last_update_id = await pool.fetchval("SELECT value FROM bot_state WHERE key = 'last_update_id'")
     updates = await with_retries(
         lambda: bot.get_updates(
@@ -115,8 +134,58 @@ async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> No
         "Telegram updates",
     )
     for update in updates:
-        if update.callback_query and is_allowed_callback(update.callback_query, settings):
-            await handle_callback(update.callback_query, bot, pool)
+        if update.callback_query:
+            callback = update.callback_query
+            if callback.message and callback.message.chat.type == "private" and is_allowed_user(callback.from_user, settings):
+                data = callback.data or ""
+                if data == "menu:home":
+                    rows = await get_queue_rows(pool)
+                    await callback.message.edit_text(build_menu_text(rows), reply_markup=build_menu_keyboard(settings))
+                    await bot.answer_callback_query(callback.id)
+                elif data == "menu:queue":
+                    rows = await get_queue_rows(pool)
+                    await callback.message.edit_text(build_queue_message(rows), reply_markup=build_queue_keyboard(rows))
+                    await bot.answer_callback_query(callback.id)
+                elif data == "menu:publish":
+                    published = await publish_next_track(bot, session, pool, settings)
+                    rows = await get_queue_rows(pool)
+                    await callback.message.edit_text(
+                        ("✅ Трек опубліковано.\n\n" if published else "ℹ️ Черга порожня або публікація не вдалася.\n\n")
+                        + build_menu_text(rows),
+                        reply_markup=build_menu_keyboard(settings),
+                    )
+                    await bot.answer_callback_query(callback.id, text="Опубліковано" if published else "Немає треку")
+                elif data == "menu:clear_confirm":
+                    await callback.message.edit_text(
+                        "⚠️ Точно очистити всі треки зі статусом «у черзі»?",
+                        reply_markup=build_clear_confirmation_keyboard(),
+                    )
+                    await bot.answer_callback_query(callback.id)
+                elif data == "menu:clear":
+                    await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
+                    await callback.message.edit_text(
+                        "✅ Чергу очищено.\n\n" + build_menu_text([]),
+                        reply_markup=build_menu_keyboard(settings),
+                    )
+                    await bot.answer_callback_query(callback.id, text="Чергу очищено")
+                elif data == "menu:help":
+                    await callback.message.edit_text(
+                        "Надішли боту аудіо, щоб додати його в чергу.\n\n"
+                        "Публікація відбувається автоматично раз на годину або вручну через меню.",
+                        reply_markup=build_menu_keyboard(settings),
+                    )
+                    await bot.answer_callback_query(callback.id)
+                elif data.startswith("publish_now:"):
+                    queue_id = int(data.split(":", 1)[1])
+                    published = await publish_specific_track(bot, session, pool, settings, queue_id)
+                    rows = await get_queue_rows(pool)
+                    await callback.message.edit_text(
+                        ("✅ Трек опубліковано.\n\n" if published else "❌ Не вдалося опублікувати трек.\n\n")
+                        + build_queue_message(rows),
+                        reply_markup=build_queue_keyboard(rows),
+                    )
+                    await bot.answer_callback_query(callback.id, text="Опубліковано" if published else "Помилка")
+
         message = update.message
         if message and message.chat.type == "private" and is_allowed_sender(message, settings):
             if message.audio:
@@ -134,13 +203,38 @@ async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> No
                     message.audio.title or "Untitled",
                 )
                 LOGGER.info("Queued: %s - %s", message.audio.performer or "Unknown artist", message.audio.title or "Untitled")
-                await bot.send_message(
-                    message.chat.id,
-                    "✅ Трек додано в чергу",
-                    reply_markup=admin_keyboard(),
-                )
-            elif message.text in {"/start", "/menu", "/queue", "/publish_now"}:
-                await bot.send_message(message.chat.id, "🎧 MØOD | UA", reply_markup=admin_keyboard())
+            elif message.text:
+                command = message.text.strip().lower()
+                if command in {"/start", "/help"}:
+                    rows = await get_queue_rows(pool)
+                    await bot.send_message(
+                        message.chat.id,
+                        build_menu_text(rows),
+                        reply_markup=build_menu_keyboard(settings),
+                    )
+                elif command == "/menu":
+                    rows = await get_queue_rows(pool)
+                    await bot.send_message(
+                        message.chat.id,
+                        build_menu_text(rows),
+                        reply_markup=build_menu_keyboard(settings),
+                    )
+                elif command == "/queue":
+                    rows = await get_queue_rows(pool)
+                    await bot.send_message(
+                        message.chat.id,
+                        build_queue_message(rows),
+                        reply_markup=build_queue_keyboard(rows),
+                    )
+                elif command == "/publish_now":
+                    published = await publish_next_track(bot, session, pool, settings)
+                    await bot.send_message(
+                        message.chat.id,
+                        "Опубліковано зараз" if published else "Нічого не було в черзі або публікація не пройшла.",
+                    )
+                elif command == "/clear_queue":
+                    deleted = await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
+                    await bot.send_message(message.chat.id, f"Чергу очищено. {deleted}")
         await pool.execute(
             """
             INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
@@ -150,39 +244,37 @@ async def ingest_updates(bot: Bot, pool: asyncpg.Pool, settings: Settings) -> No
         )
 
 
+async def update_loop(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+) -> None:
+    while True:
+        try:
+            await ingest_updates(bot, session, pool, settings)
+        except Exception:
+            LOGGER.exception("Telegram update cycle failed; retrying soon")
+        await asyncio.sleep(2)
+
+
+async def publisher_loop(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+) -> None:
+    while True:
+        try:
+            await publish_once(bot, session, pool, settings)
+        except Exception:
+            LOGGER.exception("Post cycle failed; the bot will continue")
+        LOGGER.info("Next scheduled post in %d minutes", settings.interval_minutes)
+        await asyncio.sleep(settings.interval_minutes * 60)
+
+
 def is_allowed_sender(message: Message, settings: Settings) -> bool:
-    return settings.admin_user_id is None or (
-        message.from_user is not None and message.from_user.id == settings.admin_user_id
-    )
-
-
-def admin_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Черга", callback_data="queue")],
-            [InlineKeyboardButton(text="🚀 Опублікувати зараз", callback_data="publish_now")],
-        ]
-    )
-
-
-def is_allowed_callback(callback: CallbackQuery, settings: Settings) -> bool:
-    return settings.admin_user_id is None or (
-        callback.from_user is not None and callback.from_user.id == settings.admin_user_id
-    )
-
-
-async def handle_callback(callback: CallbackQuery, bot: Bot, pool: asyncpg.Pool) -> None:
-    if callback.data == "queue":
-        count = await pool.fetchval("SELECT COUNT(*) FROM queued_tracks WHERE status = 'queued'")
-        await callback.answer(f"У черзі: {count}", show_alert=True)
-    elif callback.data == "publish_now":
-        await pool.execute(
-            """
-            INSERT INTO bot_state (key, value) VALUES ('publish_now', 1)
-            ON CONFLICT (key) DO UPDATE SET value = 1
-            """
-        )
-        await callback.answer("Опублікуємо під час найближчого запуску", show_alert=True)
+    return is_allowed_user(message.from_user, settings)
 
 
 async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
@@ -206,16 +298,176 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
     )
 
 
-def make_caption(track: Track, image: ImageResult, settings: Settings) -> str:
-    artist = html.escape(track.artist)
-    name = html.escape(track.name)
-    photographer = html.escape(image.photographer)
-    channel_url = html.escape(settings.target_channel_url, quote=True)
-    return (
-        f"🇺🇦 <b>{artist} - {name}</b>\n"
-        f"📷 Фото: {photographer} / Pexels\n\n"
-        f"<a href=\"{channel_url}\">🎧MØOD | UA🇺🇦</a>"
+def make_footer(settings: Settings) -> str:
+    channel_link = settings.channel_link
+    if channel_link:
+        footer = f"<a href=\"{channel_link}\">🎧MØOD | UA🇺🇦</a>"
+    elif settings.channel_username:
+        username = settings.channel_username.lstrip("@")
+        footer = f"<a href=\"https://t.me/{username}\">🎧MØOD | UA🇺🇦</a>"
+    else:
+        footer = "🎧MØOD | UA🇺🇦"
+    return footer
+
+
+def build_queue_message(rows: list[asyncpg.Record]) -> str:
+    if not rows:
+        return "📋 Черга порожня. Нові треки, що надіслали в бот, з'являться тут."
+    lines = ["📋 Черга на публікацію:"]
+    for index, row in enumerate(rows, start=1):
+        queued_at = row["queued_at"].strftime("%H:%M") if row["queued_at"] else "—"
+        lines.append(f"{index}. {row['artist']} — {row['name']} · {queued_at}")
+    return "\n".join(lines)
+
+
+def build_queue_keyboard(rows: list[asyncpg.Record]) -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for row in rows:
+        label = f"Опублікувати #{row['id']}"
+        keyboard.inline_keyboard.append(
+            [InlineKeyboardButton(text=label, callback_data=f"publish_now:{row['id']}")]
+        )
+    keyboard.inline_keyboard.append(
+        [InlineKeyboardButton(text="← Меню", callback_data="menu:home")]
     )
+    return keyboard
+
+
+def build_menu_keyboard(settings: Settings) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="📋 Черга треків", callback_data="menu:queue")],
+        [InlineKeyboardButton(text="▶️ Опублікувати наступний", callback_data="menu:publish")],
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data="menu:home")],
+        [InlineKeyboardButton(text="🗑 Очистити чергу", callback_data="menu:clear_confirm")],
+    ]
+    if settings.webapp_url:
+        buttons.insert(0, [InlineKeyboardButton(text="🚀 Відкрити програму", web_app=WebAppInfo(url=settings.webapp_url))])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_clear_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так, очистити", callback_data="menu:clear")],
+            [InlineKeyboardButton(text="← Скасувати", callback_data="menu:home")],
+        ]
+    )
+
+
+async def get_queue_rows(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    return await pool.fetch(
+        """
+        SELECT id, artist, name, queued_at
+        FROM queued_tracks
+        WHERE status = 'queued'
+        ORDER BY queued_at, id
+        LIMIT 20
+        """
+    )
+
+
+def build_menu_text(rows: list[asyncpg.Record]) -> str:
+    return f"🎧 <b>MØOD | UA</b>\n\nУ черзі: <b>{len(rows)}</b> треків\n\nОбери дію:"
+
+
+def is_valid_webapp_request(request: web.Request, settings: Settings) -> bool:
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    if not init_data:
+        return False
+    values = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = values.pop("hash", "")
+    if not received_hash:
+        return False
+    check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
+    secret_key = hmac.new(settings.bot_token.encode(), b"WebAppData", hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return False
+    try:
+        user = json.loads(values.get("user", "{}"))
+        auth_date = int(values.get("auth_date", "0"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        settings.admin_user_id is not None
+        and user.get("id") == settings.admin_user_id
+        and 0 <= time.time() - auth_date < 86400
+    )
+
+
+def webapp_json_rows(rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": row["id"],
+            "artist": row["artist"],
+            "name": row["name"],
+            "queued_at": row["queued_at"].isoformat() if row["queued_at"] else None,
+        }
+        for row in rows
+    ]
+
+
+def create_webapp_server(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+) -> web.Application:
+    app = web.Application()
+    webapp_dir = Path(__file__).parent / "webapp"
+
+    async def authorize(request: web.Request) -> web.Response | None:
+        if not is_valid_webapp_request(request, settings):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        return None
+
+    async def queue_handler(request: web.Request) -> web.Response:
+        unauthorized = await authorize(request)
+        if unauthorized:
+            return unauthorized
+        rows = await get_queue_rows(pool)
+        return web.json_response({"items": webapp_json_rows(rows)})
+
+    async def publish_handler(request: web.Request) -> web.Response:
+        unauthorized = await authorize(request)
+        if unauthorized:
+            return unauthorized
+        payload = await request.json() if request.can_read_body else {}
+        queue_id = payload.get("id")
+        published = (
+            await publish_specific_track(bot, session, pool, settings, int(queue_id))
+            if queue_id is not None
+            else await publish_next_track(bot, session, pool, settings)
+        )
+        return web.json_response({"published": published})
+
+    async def clear_handler(request: web.Request) -> web.Response:
+        unauthorized = await authorize(request)
+        if unauthorized:
+            return unauthorized
+        await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
+        return web.json_response({"cleared": True})
+
+    async def index_handler(_: web.Request) -> web.StreamResponse:
+        return web.FileResponse(webapp_dir / "index.html")
+
+    async def app_js_handler(_: web.Request) -> web.StreamResponse:
+        return web.FileResponse(webapp_dir / "app.js")
+
+    async def styles_handler(_: web.Request) -> web.StreamResponse:
+        return web.FileResponse(webapp_dir / "styles.css")
+
+    app.router.add_get("/", index_handler)
+    app.router.add_get("/app.js", app_js_handler)
+    app.router.add_get("/styles.css", styles_handler)
+    app.router.add_get("/api/queue", queue_handler)
+    app.router.add_post("/api/publish", publish_handler)
+    app.router.add_post("/api/clear", clear_handler)
+    return app
+
+
+def is_allowed_user(user: Any, settings: Settings) -> bool:
+    return settings.admin_user_id is None or (user is not None and user.id == settings.admin_user_id)
 
 
 async def init_database(pool: asyncpg.Pool) -> None:
@@ -246,7 +498,29 @@ async def init_database(pool: asyncpg.Pool) -> None:
     )
 
 
-async def publish_once(
+async def publish_specific_track(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+    queue_id: int,
+) -> bool:
+    row = await pool.fetchrow(
+        """
+        SELECT id, audio_file_id, artist, name
+        FROM queued_tracks
+        WHERE id = $1 AND status = 'queued'
+        LIMIT 1
+        """,
+        queue_id,
+    )
+    if not row:
+        LOGGER.info("Track %s is not queued or not found", queue_id)
+        return False
+    return await _publish_track(bot, session, pool, settings, row)
+
+
+async def publish_next_track(
     bot: Bot,
     session: aiohttp.ClientSession,
     pool: asyncpg.Pool,
@@ -264,6 +538,25 @@ async def publish_once(
     if not row:
         LOGGER.info("Queue is empty; nothing to publish")
         return False
+    return await _publish_track(bot, session, pool, settings, row)
+
+
+async def publish_once(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+) -> bool:
+    return await publish_next_track(bot, session, pool, settings)
+
+
+async def _publish_track(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    pool: asyncpg.Pool,
+    settings: Settings,
+    row: asyncpg.Record,
+) -> bool:
     track = Track(
         queue_id=row["id"],
         audio_file_id=row["audio_file_id"],
@@ -273,7 +566,7 @@ async def publish_once(
     try:
         await pool.execute("UPDATE queued_tracks SET status = 'publishing' WHERE id = $1", track.queue_id)
         image = await find_image(session, settings)
-        caption = make_caption(track, image, settings)
+        caption = f"\n{make_footer(settings)}"
         if settings.dry_run:
             LOGGER.info("DRY_RUN=true; skipping publishing")
             await pool.execute("UPDATE queued_tracks SET status = 'queued' WHERE id = $1", track.queue_id)
@@ -319,18 +612,29 @@ async def main() -> None:
             settings.bot_token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         ) as bot:
-            if settings.run_once:
-                await ingest_updates(bot, pool, settings)
-                await publish_once(bot, session, pool, settings)
+            web_runner: web.AppRunner | None = None
+            if settings.webapp_url or settings.web_only:
+                web_runner = web.AppRunner(create_webapp_server(bot, session, pool, settings))
+                await web_runner.setup()
+                await web.TCPSite(web_runner, settings.webapp_host, settings.webapp_port).start()
+                LOGGER.info("Mini App API listening on %s:%d", settings.webapp_host, settings.webapp_port)
+            if settings.web_only:
+                await asyncio.Event().wait()
                 return
-            while True:
-                try:
-                    await ingest_updates(bot, pool, settings)
-                    await publish_once(bot, session, pool, settings)
-                except Exception:
-                    LOGGER.exception("Post cycle failed; the bot will continue")
-                LOGGER.info("Next post in %d minutes", settings.interval_minutes)
-                await asyncio.sleep(settings.interval_minutes * 60)
+            if settings.run_once:
+                await ingest_updates(bot, session, pool, settings)
+                await publish_once(bot, session, pool, settings)
+                if web_runner:
+                    await web_runner.cleanup()
+                return
+            try:
+                await asyncio.gather(
+                    update_loop(bot, session, pool, settings),
+                    publisher_loop(bot, session, pool, settings),
+                )
+            finally:
+                if web_runner:
+                    await web_runner.cleanup()
     finally:
         await pool.close()
 

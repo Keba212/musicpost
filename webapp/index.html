@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MØOD | UA</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PERSONAL RELEASE DESK</p>
+        <h1>MØOD <span>| UA</span></h1>
+      </div>
+      <div class="live-dot" aria-label="Онлайн"></div>
+    </header>
+
+    <section class="summary">
+      <div>
+        <p class="label">У ЧЕРЗІ</p>
+        <strong id="count">0</strong>
+        <span>треків</span>
+      </div>
+      <button id="refresh" class="icon-button" type="button" aria-label="Оновити">↻</button>
+    </section>
+
+    <section id="status" class="status" hidden></section>
+    <section id="queue" class="queue" aria-live="polite"></section>
+
+    <footer class="actions">
+      <button id="publish" class="primary" type="button">▶ Опублікувати наступний</button>
+      <button id="clear" class="secondary" type="button">Очистити чергу</button>
+    </footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: mood-ua-mini-app
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: WEB_ONLY
+        value: "true"
+      - key: WEBAPP_HOST
+        value: "0.0.0.0"
+      - key: WEBAPP_PORT
+        value: "8080"
+      - key: WEBAPP_URL
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: TARGET_CHAT_ID
+        sync: false
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: CHANNEL_LINK
+        sync: false
+      - key: DRY_RUN
+        value: "false"

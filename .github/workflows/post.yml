@@ -19,10 +19,10 @@ jobs:
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       TARGET_CHAT_ID: ${{ secrets.TARGET_CHAT_ID }}
-      TARGET_CHANNEL_URL: ${{ secrets.TARGET_CHANNEL_URL }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
+      CHANNEL_LINK: ${{ secrets.CHANNEL_LINK }}
       DRY_RUN: "false"
       RUN_ONCE: "true"
       HTTP_TIMEOUT_SECONDS: "45"
