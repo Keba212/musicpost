@@ -2,11 +2,15 @@ name: Publish Ukrainian music
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: hourly-music-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
