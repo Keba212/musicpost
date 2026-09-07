@@ -165,7 +165,36 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
             callback = update.callback_query
             if callback.message and callback.message.chat.type == "private" and is_allowed_user(callback.from_user, settings):
                 data = callback.data or ""
-                if data == "menu:home":
+                if data.startswith("duplicate_confirm:"):
+                    request_id = int(data.split(":", 1)[1])
+                    request = await pool.fetchrow(
+                        "DELETE FROM duplicate_requests WHERE id = $1 RETURNING source_chat_id, source_message_id, audio_file_id, artist, name",
+                        request_id,
+                    )
+                    if request:
+                        await pool.execute(
+                            """
+                            INSERT INTO queued_tracks
+                                (source_chat_id, source_message_id, audio_file_id, artist, name)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
+                            """,
+                            request["source_chat_id"],
+                            request["source_message_id"],
+                            request["audio_file_id"],
+                            request["artist"],
+                            request["name"],
+                        )
+                        await callback.message.edit_text("✅ Повторний трек додано в чергу.")
+                        await answer_callback_safely(bot, callback.id, text="Додано в чергу")
+                    else:
+                        await answer_callback_safely(bot, callback.id, text="Запит уже неактивний")
+                elif data.startswith("duplicate_cancel:"):
+                    request_id = int(data.split(":", 1)[1])
+                    await pool.execute("DELETE FROM duplicate_requests WHERE id = $1", request_id)
+                    await callback.message.edit_text("↩️ Повторний трек не додано.")
+                    await answer_callback_safely(bot, callback.id, text="Скасовано")
+                elif data == "menu:home":
                     rows = await get_queue_rows(pool)
                     await callback.message.edit_text(build_menu_text(rows), reply_markup=build_menu_keyboard(settings))
                     await answer_callback_safely(bot, callback.id)
@@ -216,20 +245,56 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
         message = update.message
         if message and message.chat.type == "private" and is_allowed_sender(message, settings):
             if message.audio:
-                await pool.execute(
+                artist = message.audio.performer or "Unknown artist"
+                name = message.audio.title or "Untitled"
+                duplicate = await pool.fetchrow(
                     """
-                    INSERT INTO queued_tracks
-                        (source_chat_id, source_message_id, audio_file_id, artist, name)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
+                    SELECT id, status FROM queued_tracks
+                    WHERE audio_file_id = $1
+                       OR (LOWER(TRIM(artist)) = LOWER(TRIM($2)) AND LOWER(TRIM(name)) = LOWER(TRIM($3)))
+                    ORDER BY CASE WHEN status = 'queued' THEN 0 ELSE 1 END, id
+                    LIMIT 1
                     """,
-                    message.chat.id,
-                    message.message_id,
                     message.audio.file_id,
-                    message.audio.performer or "Unknown artist",
-                    message.audio.title or "Untitled",
+                    artist,
+                    name,
                 )
-                LOGGER.info("Queued: %s - %s", message.audio.performer or "Unknown artist", message.audio.title or "Untitled")
+                if duplicate:
+                    request = await pool.fetchrow(
+                        """
+                        INSERT INTO duplicate_requests
+                            (source_chat_id, source_message_id, audio_file_id, artist, name)
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING id
+                        """,
+                        message.chat.id,
+                        message.message_id,
+                        message.audio.file_id,
+                        artist,
+                        name,
+                    )
+                    status_text = "ще є в черзі" if duplicate["status"] == "queued" else "вже була опублікована"
+                    await bot.send_message(
+                        message.chat.id,
+                        f"⚠️ <b>{artist} — {name}</b> {status_text}.\n\nВпевнені, що хочете додати її ще раз?",
+                        reply_markup=build_duplicate_keyboard(request["id"]),
+                    )
+                    LOGGER.info("Duplicate detected: %s - %s", artist, name)
+                else:
+                    await pool.execute(
+                        """
+                        INSERT INTO queued_tracks
+                            (source_chat_id, source_message_id, audio_file_id, artist, name)
+                        VALUES ($1, $2, $3, $4, $5)
+                        ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
+                        """,
+                        message.chat.id,
+                        message.message_id,
+                        message.audio.file_id,
+                        artist,
+                        name,
+                    )
+                    LOGGER.info("Queued: %s - %s", artist, name)
             elif message.text:
                 command = message.text.strip().lower()
                 if command in {"/start", "/help"}:
@@ -383,6 +448,15 @@ def build_clear_confirmation_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_duplicate_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Так, додати ще раз", callback_data=f"duplicate_confirm:{request_id}")],
+            [InlineKeyboardButton(text="Скасувати", callback_data=f"duplicate_cancel:{request_id}")],
+        ]
+    )
+
+
 async def get_queue_rows(pool: asyncpg.Pool) -> list[asyncpg.Record]:
     return await pool.fetch(
         """
@@ -522,6 +596,19 @@ async def init_database(pool: asyncpg.Pool) -> None:
         CREATE TABLE IF NOT EXISTS bot_state (
             key TEXT PRIMARY KEY,
             value BIGINT NOT NULL
+        )
+        """
+    )
+    await pool.execute(
+        """
+        CREATE TABLE IF NOT EXISTS duplicate_requests (
+            id BIGSERIAL PRIMARY KEY,
+            source_chat_id BIGINT NOT NULL,
+            source_message_id BIGINT NOT NULL,
+            audio_file_id TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """
     )
