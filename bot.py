@@ -32,6 +32,7 @@ class Settings:
     interval_minutes: int
     image_style: str
     timeout_seconds: int
+    run_once: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,6 +53,7 @@ class Settings:
                 "dark cinematic Ukrainian music aesthetic, night city, neon, film grain, blue and yellow accents",
             ),
             timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "45")),
+            run_once=os.getenv("RUN_ONCE", "false").lower() == "true",
         )
 
 
@@ -263,15 +265,20 @@ async def main() -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     await init_database(pool)
     timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
-    async with aiohttp.ClientSession(timeout=timeout) as session, Bot(settings.bot_token) as bot:
-        while True:
-            try:
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session, Bot(settings.bot_token) as bot:
+            if settings.run_once:
                 await publish_once(bot, session, pool, settings)
-            except Exception:
-                LOGGER.exception("Post cycle failed; the bot will continue")
-            LOGGER.info("Next post in %d minutes", settings.interval_minutes)
-            await asyncio.sleep(settings.interval_minutes * 60)
-    await pool.close()
+                return
+            while True:
+                try:
+                    await publish_once(bot, session, pool, settings)
+                except Exception:
+                    LOGGER.exception("Post cycle failed; the bot will continue")
+                LOGGER.info("Next post in %d minutes", settings.interval_minutes)
+                await asyncio.sleep(settings.interval_minutes * 60)
+    finally:
+        await pool.close()
 
 
 if __name__ == "__main__":

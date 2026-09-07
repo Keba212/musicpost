@@ -6,7 +6,7 @@
 
 Бот шукає треки через офіційний Jamendo API v3, бере лише треки з `audiodownload_allowed=true`, знаходить фото через Pexels API, публікує фото й аудіо через Telegram Bot API та записує `track_id` у PostgreSQL для захисту від повторів. Тимчасові файли створюються у `/tmp` і видаляються одразу після публікації.
 
-`DRY_RUN=true` є безпечним значенням у `.env.example`: бот може перевірити пошук, але не завантажує та не публікує медіа. Для production Fly.io конфігурація виставляє `DRY_RUN=false`.
+`DRY_RUN=true` є безпечним значенням у `.env.example`: бот може перевірити пошук, але не завантажує та не публікує медіа. Для production GitHub Actions виставляє `DRY_RUN=false` і `RUN_ONCE=true`.
 
 ## Безпека
 
@@ -32,7 +32,28 @@ git push -u origin main
 docker compose up --build
 ```
 
-## Deployment на Fly.io
+## Безкоштовний deployment через GitHub Actions
+
+Цей варіант не потребує постійної Fly Machine. GitHub Actions запускає один цикл бота кожні 6 годин. Розклад GitHub може виконуватися із затримкою. Для дедуплікації потрібен безкоштовний PostgreSQL provider, наприклад Neon Free або Supabase Free; цей проєкт не створює базу автоматично.
+
+1. Створіть PostgreSQL database у вибраному provider і скопіюйте pooled connection string.
+2. У GitHub repository відкрийте `Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`.
+3. Додайте такі secrets:
+
+```text
+BOT_TOKEN
+TARGET_CHAT_ID
+JAMENDO_CLIENT_ID
+PEXELS_API_KEY
+DATABASE_URL
+```
+
+4. Відкрийте вкладку `Actions`, виберіть `Publish Ukrainian music` і натисніть `Run workflow` для першого запуску.
+5. Наступні запуски відбуватимуться автоматично кожні 6 годин. Результати та помилки доступні у вкладці workflow logs.
+
+GitHub Actions secrets не виводяться у логи. Не додавайте їх у `.env`, commit або README.
+
+## Альтернативний deployment на Fly.io
 
 Встановіть актуальний `flyctl`, потім увійдіть:
 
@@ -98,7 +119,7 @@ fly logs -a ukrainian-music-bot
 - Jamendo не гарантує українську мову кожного результату за одним тегом. Бот використовує `fuzzytags=ukrainian` і пропускає треки без дозволеного download URL. Це найближчий легальний варіант без scraping або обходу обмежень.
 - Pexels вимагає attribution: caption містить посилання на фотографа, фото і Pexels.
 - Telegram Bot API має ліміти розміру медіа та rate limits. HTTP 408/425/429/5xx і тимчасові помилки повторюються з exponential backoff. Якщо окремий трек не завантажився, цикл завершується з помилкою, файли чистяться, а наступна спроба не зупиняє процес.
-- На Fly.io root filesystem є ephemeral. Бот не зберігає медіа після публікації; PostgreSQL зберігає лише metadata і deduplication IDs.
+- Тимчасові audio/image файли видаляються після кожного запуску; PostgreSQL зберігає лише metadata і deduplication IDs.
 
 ## Офіційна документація
 
