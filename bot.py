@@ -6,6 +6,7 @@ import os
 import random
 import tempfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -21,6 +22,7 @@ LOGGER = logging.getLogger("ukrainian_music_bot")
 JAMENDO_TRACKS_URL = "https://api.jamendo.com/v3.0/tracks/"
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+MINIMUM_RELEASE_YEAR = 2020
 
 
 @dataclass(frozen=True)
@@ -127,7 +129,9 @@ async def find_tracks(session: aiohttp.ClientSession, settings: Settings, pool: 
                 "client_id": settings.jamendo_client_id,
                 "format": "json",
                 "limit": 30,
-                "fuzzytags": "ukrainian",
+                "lang": "uk",
+                "datebetween": f"{MINIMUM_RELEASE_YEAR}-01-01_{date.today().year}-12-31",
+                "order": "releasedate_desc",
                 "audiodlformat": "mp32",
                 "include": "licenses",
                 "type": "single albumtrack",
@@ -183,13 +187,7 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
 
 
 def make_caption(track: Track, image: ImageResult) -> str:
-    return (
-        f"🇺🇦 <b>{track.artist} - {track.name}</b>\n\n"
-        f"🎵 Licensed download from <a href=\"{track.share_url}\">Jamendo</a>\n"
-        f"📷 Photo by <a href=\"{image.photographer_url}\">{image.photographer}</a> on "
-        f"<a href=\"https://www.pexels.com\">Pexels</a>\n"
-        f"🔗 <a href=\"{track.license_url}\">Track license</a>"
-    )
+    return f"🇺🇦 <b>{track.artist} - {track.name}</b>\n📷 Фото: {image.photographer} / Pexels"
 
 
 async def init_database(pool: asyncpg.Pool) -> None:
