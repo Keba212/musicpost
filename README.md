@@ -43,11 +43,12 @@ docker compose up --build
 ```text
 BOT_TOKEN
 TARGET_CHAT_ID
-TARGET_CHANNEL_URL
 PEXELS_API_KEY
 DATABASE_URL
 ADMIN_USER_ID
 ```
+
+`TARGET_CHANNEL_URL` можна додати окремо як optional secret, якщо хочеш клікабельне посилання на канал у caption. Без нього бот опублікує той самий підпис, але без посилання.
 
 4. Відкрийте вкладку `Actions`, виберіть `Publish Ukrainian music` і натисніть `Run workflow` для першого запуску.
 5. Наступні запуски відбуватимуться автоматично щогодини. Якщо відповідного треку немає, бот нічого не публікує і чекає наступної години. Результати та помилки доступні у вкладці workflow logs.

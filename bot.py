@@ -25,7 +25,7 @@ RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 class Settings:
     bot_token: str
     target_chat_id: str
-    target_channel_url: str
+    target_channel_url: str | None
     pexels_api_key: str
     database_url: str
     admin_user_id: int | None
@@ -37,14 +37,15 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "TARGET_CHANNEL_URL", "PEXELS_API_KEY", "DATABASE_URL")
+        required = ("BOT_TOKEN", "TARGET_CHAT_ID", "PEXELS_API_KEY", "DATABASE_URL")
         missing = [name for name in required if not os.getenv(name)]
         if missing and os.getenv("DRY_RUN", "true").lower() != "true":
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+        target_channel_url = os.getenv("TARGET_CHANNEL_URL", "").strip() or None
         return cls(
             bot_token=os.getenv("BOT_TOKEN", "dry-run-token"),
             target_chat_id=os.getenv("TARGET_CHAT_ID", "dry-run-chat"),
-            target_channel_url=os.getenv("TARGET_CHANNEL_URL", "https://t.me/"),
+            target_channel_url=target_channel_url,
             pexels_api_key=os.getenv("PEXELS_API_KEY", "dry-run-key"),
             database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ukrainian_music"),
             admin_user_id=int(os.environ["ADMIN_USER_ID"]) if os.getenv("ADMIN_USER_ID") else None,
@@ -210,11 +211,15 @@ def make_caption(track: Track, image: ImageResult, settings: Settings) -> str:
     artist = html.escape(track.artist)
     name = html.escape(track.name)
     photographer = html.escape(image.photographer)
-    channel_url = html.escape(settings.target_channel_url, quote=True)
+    channel_label = "🎧MØOD | UA🇺🇦"
+    channel_line = channel_label
+    if settings.target_channel_url:
+        channel_url = html.escape(settings.target_channel_url, quote=True)
+        channel_line = f"<a href=\"{channel_url}\">{channel_label}</a>"
     return (
         f"🇺🇦 <b>{artist} - {name}</b>\n"
         f"📷 Фото: {photographer} / Pexels\n\n"
-        f"<a href=\"{channel_url}\">🎧MØOD | UA🇺🇦</a>"
+        f"{channel_line}"
     )
 
 
