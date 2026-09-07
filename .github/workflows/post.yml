@@ -23,6 +23,7 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
       CHANNEL_LINK: ${{ secrets.CHANNEL_LINK }}
+      WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
       DRY_RUN: "false"
       RUN_ONCE: "true"
       HTTP_TIMEOUT_SECONDS: "45"
