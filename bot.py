@@ -137,6 +137,18 @@ async def answer_callback_safely(bot: Bot, callback_id: str, text: str | None = 
         raise
 
 
+async def configure_menu_button(bot: Bot, settings: Settings) -> None:
+    if not settings.webapp_url:
+        LOGGER.warning("WEBAPP_URL is empty; Telegram Mini App menu button was not configured")
+        return
+    await bot.set_chat_menu_button(
+        menu_button=MenuButtonWebApp(
+            text="Програма",
+            web_app=WebAppInfo(url=settings.webapp_url),
+        )
+    )
+
+
 async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg.Pool, settings: Settings) -> None:
     last_update_id = await pool.fetchval("SELECT value FROM bot_state WHERE key = 'last_update_id'")
     updates = await with_retries(
@@ -221,6 +233,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
             elif message.text:
                 command = message.text.strip().lower()
                 if command in {"/start", "/help"}:
+                    await configure_menu_button(bot, settings)
                     rows = await get_queue_rows(pool)
                     await bot.send_message(
                         message.chat.id,
@@ -228,6 +241,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         reply_markup=build_menu_keyboard(settings),
                     )
                 elif command == "/menu":
+                    await configure_menu_button(bot, settings)
                     rows = await get_queue_rows(pool)
                     await bot.send_message(
                         message.chat.id,
@@ -628,12 +642,7 @@ async def main() -> None:
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         ) as bot:
             if settings.webapp_url:
-                await bot.set_chat_menu_button(
-                    menu_button=MenuButtonWebApp(
-                        text="Програма",
-                        web_app=WebAppInfo(url=settings.webapp_url),
-                    )
-                )
+                await configure_menu_button(bot, settings)
             web_runner: web.AppRunner | None = None
             if settings.webapp_url or settings.web_only:
                 web_runner = web.AppRunner(create_webapp_server(bot, session, pool, settings))
