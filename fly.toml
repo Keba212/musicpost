@@ -1,0 +1,16 @@
+app = "ukrainian-music-bot"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DRY_RUN = "false"
+  POST_INTERVAL_MINUTES = "360"
+  IMAGE_STYLE = "dark cinematic Ukrainian music aesthetic, night city, neon, film grain, blue and yellow accents"
+  HTTP_TIMEOUT_SECONDS = "45"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
