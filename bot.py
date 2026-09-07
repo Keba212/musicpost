@@ -21,7 +21,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Message, WebAppInfo
 
 
 LOGGER = logging.getLogger("ukrainian_music_bot")
@@ -627,6 +627,13 @@ async def main() -> None:
             settings.bot_token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         ) as bot:
+            if settings.webapp_url:
+                await bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(
+                        text="Програма",
+                        web_app=WebAppInfo(url=settings.webapp_url),
+                    )
+                )
             web_runner: web.AppRunner | None = None
             if settings.webapp_url or settings.web_only:
                 web_runner = web.AppRunner(create_webapp_server(bot, session, pool, settings))
