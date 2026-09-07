@@ -379,7 +379,7 @@ def is_valid_webapp_request(request: web.Request, settings: Settings) -> bool:
     if not received_hash:
         return False
     check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
-    secret_key = hmac.new(settings.bot_token.encode(), b"WebAppData", hashlib.sha256).digest()
+    secret_key = hmac.new(b"WebAppData", settings.bot_token.encode(), hashlib.sha256).digest()
     expected_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_hash, received_hash):
         return False
