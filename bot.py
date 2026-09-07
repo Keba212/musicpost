@@ -12,6 +12,8 @@ from typing import Any, Awaitable, Callable
 import aiohttp
 import asyncpg
 from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import FSInputFile
 
 
@@ -266,7 +268,10 @@ async def main() -> None:
     await init_database(pool)
     timeout = aiohttp.ClientTimeout(total=settings.timeout_seconds)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session, Bot(settings.bot_token) as bot:
+        async with aiohttp.ClientSession(timeout=timeout), Bot(
+            settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        ) as bot:
             if settings.run_once:
                 await publish_once(bot, session, pool, settings)
                 return
