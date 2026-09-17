@@ -27,6 +27,28 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButton
 LOGGER = logging.getLogger("ukrainian_music_bot")
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+IMAGE_SEARCH_QUERIES = (
+    "night city neon music Ukraine",
+    "Kyiv night city lights",
+    "Lviv night street lights",
+    "Ukrainian night city skyline",
+    "neon concert stage",
+    "live music concert lights",
+    "DJ club neon lights",
+    "singer microphone stage lights",
+    "headphones music dark background",
+    "vinyl record neon light",
+    "cassette player music aesthetic",
+    "electric guitar concert lights",
+    "piano night city window",
+    "rainy city night neon",
+    "blue yellow city lights",
+    "urban night photography",
+    "music studio dark lights",
+    "festival crowd night lights",
+    "abstract sound waves neon",
+    "cinematic city night film grain",
+)
 
 load_dotenv()
 
@@ -377,7 +399,12 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
         lambda: request_json(
             session,
             PEXELS_SEARCH_URL,
-            params={"query": "night city neon music Ukraine", "orientation": "landscape", "per_page": 15},
+            params={
+                "query": random.choice(IMAGE_SEARCH_QUERIES),
+                "orientation": "landscape",
+                "per_page": 80,
+                "page": random.randint(1, 10),
+            },
             headers={"Authorization": settings.pexels_api_key},
         ),
         "Pexels search",
