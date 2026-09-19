@@ -333,7 +333,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                 cover_file_id = message.photo[-1].file_id
                 await pool.execute(
                     """
-                    INSERT INTO bot_state (key, value) VALUES ('post_image_file_id', $1)
+                    INSERT INTO bot_settings (key, value) VALUES ('post_image_file_id', $1)
                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                     """,
                     cover_file_id,
@@ -684,7 +684,12 @@ async def init_database(pool: asyncpg.Pool) -> None:
         """
     )
     await pool.execute(
-        "ALTER TABLE bot_state ALTER COLUMN value TYPE TEXT USING value::TEXT"
+        """
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
     )
     await pool.execute(
         """
@@ -769,7 +774,7 @@ async def _publish_track(
     try:
         await pool.execute("UPDATE queued_tracks SET status = 'publishing' WHERE id = $1", track.queue_id)
         saved_cover_file_id = await pool.fetchval(
-            "SELECT value FROM bot_state WHERE key = 'post_image_file_id'"
+            "SELECT value FROM bot_settings WHERE key = 'post_image_file_id'"
         )
         cover_source = settings.post_image_url or saved_cover_file_id
         image = await find_image(session, settings)
