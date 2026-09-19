@@ -416,8 +416,12 @@ def is_allowed_sender(message: Message, settings: Settings) -> bool:
     return is_allowed_user(message.from_user, settings)
 
 
-async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
-    if settings.post_image_url:
+async def find_image(
+    session: aiohttp.ClientSession,
+    settings: Settings,
+    use_custom: bool = True,
+) -> ImageResult:
+    if use_custom and settings.post_image_url:
         return ImageResult(download_url=settings.post_image_url, photographer="custom")
 
     LOGGER.info("Searching image...")
@@ -777,7 +781,7 @@ async def _publish_track(
             "SELECT value FROM bot_settings WHERE key = 'post_image_file_id'"
         )
         cover_source = settings.post_image_url or saved_cover_file_id
-        image = None if cover_source else await find_image(session, settings)
+        image = await find_image(session, settings, use_custom=False)
         caption = f"\n{make_footer(settings)}"
         if settings.dry_run:
             LOGGER.info("DRY_RUN=true; skipping publishing")
@@ -793,11 +797,10 @@ async def _publish_track(
                 track,
                 cover_source,
             )
-        if image:
-            await with_retries(
-                lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
-                "Telegram photo publish",
-            )
+        await with_retries(
+            lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
+            "Telegram photo publish",
+        )
         audio_message = await with_retries(
             lambda: bot.send_audio(
                 settings.target_chat_id,
