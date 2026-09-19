@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import time
+from io import BytesIO
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -21,7 +22,14 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Message, WebAppInfo
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    Message,
+    WebAppInfo,
+)
 
 
 LOGGER = logging.getLogger("ukrainian_music_bot")
@@ -58,6 +66,7 @@ class Settings:
     bot_token: str
     target_chat_id: str
     pexels_api_key: str
+    post_image_url: str
     database_url: str
     admin_user_id: int | None
     dry_run: bool
@@ -84,6 +93,7 @@ class Settings:
             bot_token=os.getenv("BOT_TOKEN", "dry-run-token"),
             target_chat_id=os.getenv("TARGET_CHAT_ID", "dry-run-chat"),
             pexels_api_key=os.getenv("PEXELS_API_KEY", "dry-run-key"),
+            post_image_url=os.getenv("POST_IMAGE_URL", "").strip(),
             database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ukrainian_music"),
             admin_user_id=int(os.environ["ADMIN_USER_ID"]) if os.getenv("ADMIN_USER_ID") else None,
             dry_run=os.getenv("DRY_RUN", "true").lower() == "true",
@@ -317,6 +327,17 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         name,
                     )
                     LOGGER.info("Queued: %s - %s", artist, name)
+            elif message.photo:
+                cover_file_id = message.photo[-1].file_id
+                await pool.execute(
+                    """
+                    INSERT INTO bot_state (key, value) VALUES ('post_image_file_id', $1)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    cover_file_id,
+                )
+                await bot.send_message(message.chat.id, "✅ Цю картинку збережено як обкладинку музики.")
+                LOGGER.info("Updated music post cover")
             elif message.text:
                 command = message.text.strip().lower()
                 if command in {"/start", "/help"}:
@@ -394,6 +415,9 @@ def is_allowed_sender(message: Message, settings: Settings) -> bool:
 
 
 async def find_image(session: aiohttp.ClientSession, settings: Settings) -> ImageResult:
+    if settings.post_image_url:
+        return ImageResult(download_url=settings.post_image_url, photographer="custom")
+
     LOGGER.info("Searching image...")
     payload = await with_retries(
         lambda: request_json(
@@ -416,6 +440,37 @@ async def find_image(session: aiohttp.ClientSession, settings: Settings) -> Imag
     return ImageResult(
         download_url=photo["src"]["large"],
         photographer=photo["photographer"],
+    )
+
+
+async def prepare_audio_with_cover(
+    bot: Bot,
+    session: aiohttp.ClientSession,
+    track: Track,
+    cover_source: str,
+) -> tuple[BufferedInputFile, BufferedInputFile]:
+    telegram_file = await bot.get_file(track.audio_file_id)
+    if not telegram_file.file_path:
+        raise RuntimeError("Telegram did not return the audio file path")
+
+    audio_buffer = BytesIO()
+    await bot.download(telegram_file, destination=audio_buffer)
+
+    if cover_source.startswith(("http://", "https://")):
+        async with session.get(cover_source) as response:
+            response.raise_for_status()
+            cover_bytes = await response.read()
+    else:
+        cover_file = await bot.get_file(cover_source)
+        if not cover_file.file_path:
+            raise RuntimeError("Telegram did not return the cover file path")
+        cover_buffer = BytesIO()
+        await bot.download(cover_file, destination=cover_buffer)
+        cover_bytes = cover_buffer.getvalue()
+
+    return (
+        BufferedInputFile(audio_buffer.getvalue(), filename=f"{track.name}.mp3"),
+        BufferedInputFile(cover_bytes, filename="cover.jpg"),
     )
 
 
@@ -708,13 +763,28 @@ async def _publish_track(
     )
     try:
         await pool.execute("UPDATE queued_tracks SET status = 'publishing' WHERE id = $1", track.queue_id)
+        saved_cover_file_id = await pool.fetchval(
+            "SELECT value FROM bot_state WHERE key = 'post_image_file_id'"
+        )
+        cover_source = settings.post_image_url or saved_cover_file_id
         image = await find_image(session, settings)
+        if cover_source and not settings.post_image_url:
+            image = ImageResult(download_url=cover_source, photographer="custom")
         caption = f"\n{make_footer(settings)}"
         if settings.dry_run:
             LOGGER.info("DRY_RUN=true; skipping publishing")
             await pool.execute("UPDATE queued_tracks SET status = 'queued' WHERE id = $1", track.queue_id)
             return True
         LOGGER.info("Publishing...")
+        audio = track.audio_file_id
+        thumbnail = None
+        if cover_source:
+            audio, thumbnail = await prepare_audio_with_cover(
+                bot,
+                session,
+                track,
+                cover_source,
+            )
         await with_retries(
             lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
             "Telegram photo publish",
@@ -722,10 +792,11 @@ async def _publish_track(
         audio_message = await with_retries(
             lambda: bot.send_audio(
                 settings.target_chat_id,
-                track.audio_file_id,
+                audio,
                 title=track.name,
                 performer=track.artist,
                 caption=caption,
+                thumbnail=thumbnail,
             ),
             "Telegram audio publish",
         )
