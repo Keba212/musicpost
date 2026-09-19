@@ -182,7 +182,9 @@ async def configure_menu_button(bot: Bot, settings: Settings) -> None:
 
 
 async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg.Pool, settings: Settings) -> None:
-    last_update_id = await pool.fetchval("SELECT value FROM bot_state WHERE key = 'last_update_id'")
+    last_update_id = await pool.fetchval(
+        "SELECT value::BIGINT FROM bot_state WHERE key = 'last_update_id'"
+    )
     updates = await with_retries(
         lambda: bot.get_updates(
             offset=(last_update_id or 0) + 1,
@@ -680,6 +682,9 @@ async def init_database(pool: asyncpg.Pool) -> None:
             value BIGINT NOT NULL
         )
         """
+    )
+    await pool.execute(
+        "ALTER TABLE bot_state ALTER COLUMN value TYPE TEXT USING value::TEXT"
     )
     await pool.execute(
         """
