@@ -777,9 +777,7 @@ async def _publish_track(
             "SELECT value FROM bot_settings WHERE key = 'post_image_file_id'"
         )
         cover_source = settings.post_image_url or saved_cover_file_id
-        image = await find_image(session, settings)
-        if cover_source and not settings.post_image_url:
-            image = ImageResult(download_url=cover_source, photographer="custom")
+        image = None if cover_source else await find_image(session, settings)
         caption = f"\n{make_footer(settings)}"
         if settings.dry_run:
             LOGGER.info("DRY_RUN=true; skipping publishing")
@@ -795,10 +793,11 @@ async def _publish_track(
                 track,
                 cover_source,
             )
-        await with_retries(
-            lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
-            "Telegram photo publish",
-        )
+        if image:
+            await with_retries(
+                lambda: bot.send_photo(settings.target_chat_id, image.download_url, caption=caption),
+                "Telegram photo publish",
+            )
         audio_message = await with_retries(
             lambda: bot.send_audio(
                 settings.target_chat_id,
