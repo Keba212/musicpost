@@ -195,6 +195,13 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
         "Telegram updates",
     )
     for update in updates:
+        await pool.execute(
+            """
+            INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            update.update_id,
+        )
         if update.callback_query:
             callback = update.callback_query
             if callback.message and callback.message.chat.type == "private" and is_allowed_user(callback.from_user, settings):
@@ -206,12 +213,13 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         request_id,
                     )
                     if request:
-                        await pool.execute(
+                        inserted = await pool.fetchval(
                             """
                             INSERT INTO queued_tracks
                                 (source_chat_id, source_message_id, audio_file_id, artist, name)
                             VALUES ($1, $2, $3, $4, $5)
                             ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
+                            RETURNING id
                             """,
                             request["source_chat_id"],
                             request["source_message_id"],
@@ -219,8 +227,12 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                             request["artist"],
                             request["name"],
                         )
-                        await callback.message.edit_text("✅ Повторний трек додано в чергу.")
-                        await answer_callback_safely(bot, callback.id, text="Додано в чергу")
+                        if inserted:
+                            await callback.message.edit_text("✅ Повторний трек додано в чергу.")
+                            await answer_callback_safely(bot, callback.id, text="Додано в чергу")
+                        else:
+                            await callback.message.edit_text("ℹ️ Цей повторний трек уже є в черзі.")
+                            await answer_callback_safely(bot, callback.id, text="Вже в черзі")
                     else:
                         await answer_callback_safely(bot, callback.id, text="Запит уже неактивний")
                 elif data.startswith("duplicate_cancel:"):
@@ -294,6 +306,19 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                     name,
                 )
                 if duplicate:
+                    existing_request_id = await pool.fetchval(
+                        """
+                        SELECT id
+                        FROM duplicate_requests
+                        WHERE source_chat_id = $1 AND source_message_id = $2
+                        LIMIT 1
+                        """,
+                        message.chat.id,
+                        message.message_id,
+                    )
+                    if existing_request_id:
+                        LOGGER.info("Duplicate request already exists for message %s", message.message_id)
+                        continue
                     request = await pool.fetchrow(
                         """
                         INSERT INTO duplicate_requests
@@ -374,13 +399,6 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                 elif command == "/clear_queue":
                     deleted = await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
                     await bot.send_message(message.chat.id, f"Чергу очищено. {deleted}")
-        await pool.execute(
-            """
-            INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """,
-            update.update_id,
-        )
 
 
 async def update_loop(

@@ -24,7 +24,7 @@ jobs:
       ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
       CHANNEL_LINK: ${{ secrets.CHANNEL_LINK }}
       WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
-      INGEST_UPDATES: "false"
+      INGEST_UPDATES: "true"
       PUBLISH_ENABLED: "true"
       DRY_RUN: "false"
       RUN_ONCE: "true"
