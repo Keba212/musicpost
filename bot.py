@@ -202,7 +202,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
             INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
             """,
-            update.update_id,
+            str(update.update_id),
         )
         if update.callback_query:
             callback = update.callback_query
@@ -687,15 +687,15 @@ async def init_database(pool: asyncpg.Pool) -> None:
         """
         CREATE TABLE IF NOT EXISTS bot_state (
             key TEXT PRIMARY KEY,
-            value BIGINT NOT NULL
+            value TEXT NOT NULL
         )
         """
     )
     await pool.execute(
         """
         ALTER TABLE bot_state
-        ALTER COLUMN value TYPE BIGINT
-        USING value::BIGINT
+        ALTER COLUMN value TYPE TEXT
+        USING value::TEXT
         """
     )
     await pool.execute(
