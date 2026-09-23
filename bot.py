@@ -79,6 +79,7 @@ class Settings:
     webapp_url: str
     webapp_host: str
     webapp_port: int
+    web_server_enabled: bool
     web_only: bool
     ingest_updates_enabled: bool
     publish_enabled: bool
@@ -109,6 +110,7 @@ class Settings:
             webapp_url=os.getenv("WEBAPP_URL", "").strip(),
             webapp_host=os.getenv("WEBAPP_HOST", "0.0.0.0"),
             webapp_port=int(os.getenv("WEBAPP_PORT", "8080")),
+            web_server_enabled=os.getenv("WEB_SERVER_ENABLED", "false").lower() == "true",
             web_only=os.getenv("WEB_ONLY", "false").lower() == "true",
             ingest_updates_enabled=os.getenv("INGEST_UPDATES", "true").lower() == "true",
             publish_enabled=os.getenv("PUBLISH_ENABLED", "true").lower() == "true",
@@ -841,7 +843,7 @@ async def main() -> None:
             if settings.webapp_url:
                 await configure_menu_button(bot, settings)
             web_runner: web.AppRunner | None = None
-            if settings.webapp_url or settings.web_only:
+            if settings.web_server_enabled or settings.webapp_url or settings.web_only:
                 web_runner = web.AppRunner(create_webapp_server(bot, session, pool, settings))
                 await web_runner.setup()
                 await web.TCPSite(web_runner, settings.webapp_host, settings.webapp_port).start()
