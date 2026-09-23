@@ -197,6 +197,13 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
         "Telegram updates",
     )
     for update in updates:
+        await pool.execute(
+            """
+            INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            update.update_id,
+        )
         if update.callback_query:
             callback = update.callback_query
             if callback.message and callback.message.chat.type == "private" and is_allowed_user(callback.from_user, settings):
@@ -301,6 +308,7 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         INSERT INTO duplicate_requests
                             (source_chat_id, source_message_id, audio_file_id, artist, name)
                         VALUES ($1, $2, $3, $4, $5)
+                        ON CONFLICT (source_chat_id, source_message_id) DO NOTHING
                         RETURNING id
                         """,
                         message.chat.id,
@@ -309,6 +317,9 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                         artist,
                         name,
                     )
+                    if not request:
+                        LOGGER.info("Duplicate warning already sent for message %s", message.message_id)
+                        continue
                     status_text = "ще є в черзі" if duplicate["status"] == "queued" else "вже була опублікована"
                     await bot.send_message(
                         message.chat.id,
@@ -376,15 +387,6 @@ async def ingest_updates(bot: Bot, session: aiohttp.ClientSession, pool: asyncpg
                 elif command == "/clear_queue":
                     deleted = await pool.execute("DELETE FROM queued_tracks WHERE status = 'queued'")
                     await bot.send_message(message.chat.id, f"Чергу очищено. {deleted}")
-        await pool.execute(
-            """
-            INSERT INTO bot_state (key, value) VALUES ('last_update_id', $1)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """,
-            update.update_id,
-        )
-
-
 async def update_loop(
     bot: Bot,
     session: aiohttp.ClientSession,
@@ -708,6 +710,21 @@ async def init_database(pool: asyncpg.Pool) -> None:
             name TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+        """
+    )
+    await pool.execute(
+        """
+        DELETE FROM duplicate_requests older
+        USING duplicate_requests newer
+        WHERE older.source_chat_id = newer.source_chat_id
+          AND older.source_message_id = newer.source_message_id
+          AND older.id > newer.id
+        """
+    )
+    await pool.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS duplicate_requests_source_message_idx
+        ON duplicate_requests (source_chat_id, source_message_id)
         """
     )
 
