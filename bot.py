@@ -693,6 +693,13 @@ async def init_database(pool: asyncpg.Pool) -> None:
     )
     await pool.execute(
         """
+        ALTER TABLE bot_state
+        ALTER COLUMN value TYPE BIGINT
+        USING value::BIGINT
+        """
+    )
+    await pool.execute(
+        """
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
